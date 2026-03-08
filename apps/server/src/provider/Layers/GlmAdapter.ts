@@ -755,6 +755,10 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
             return;
           }
 
+          // Each iteration gets a unique itemId so plan text (iteration 0) and
+          // final response become separate messages in the timeline.
+          const iterationItemId = `msg-iter-${iteration}-${turnId}`;
+
           let response: Response;
           try {
             response = await fetch(`${baseUrl}/chat/completions`, {
@@ -829,7 +833,7 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
             if (choice.delta.content) {
               assistantContent += choice.delta.content;
               emit({
-                ...makeEventBase(session.threadId, turnId),
+                ...makeEventBase(session.threadId, turnId, iterationItemId),
                 type: "content.delta",
                 payload: {
                   streamKind: "assistant_text",
@@ -874,9 +878,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
           // If no tool calls, turn is complete
           if (resolvedToolCalls.length === 0) {
             if (assistantContent) {
-              // Use turnId-based identity (no itemId) to match content.delta events
               emit({
-                ...makeEventBase(session.threadId, turnId),
+                ...makeEventBase(session.threadId, turnId, iterationItemId),
                 type: "item.completed",
                 payload: {
                   itemType: "assistant_message",
@@ -898,10 +901,9 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
           // If the model produced plan/explanation text alongside tool calls,
           // emit it as a completed assistant message so the UI renders it
           // before the tool calls start executing.
-          // Use turnId-based identity (no itemId) to match content.delta events.
           if (assistantContent) {
             emit({
-              ...makeEventBase(session.threadId, turnId),
+              ...makeEventBase(session.threadId, turnId, iterationItemId),
               type: "item.completed",
               payload: {
                 itemType: "assistant_message",

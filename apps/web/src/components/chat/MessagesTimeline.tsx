@@ -295,40 +295,140 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         (() => {
           const groupId = row.id;
           const groupedEntries = row.groupedEntries;
+
+          // Separate agent entries from regular tool entries
+          const agentGroups = new Map<string, TimelineWorkEntry[]>();
+          const regularEntries: TimelineWorkEntry[] = [];
+
+          for (const entry of groupedEntries) {
+            if (entry.itemType === "collab_agent_tool_call" && entry.agentName) {
+              const existing = agentGroups.get(entry.agentName) ?? [];
+              existing.push(entry);
+              agentGroups.set(entry.agentName, existing);
+            } else if (entry.itemType === "collab_agent_tool_call" && !entry.agentName) {
+              const key = "__unnamed_agent__";
+              const existing = agentGroups.get(key) ?? [];
+              existing.push(entry);
+              agentGroups.set(key, existing);
+            } else {
+              regularEntries.push(entry);
+            }
+          }
+
           const isExpanded = expandedWorkGroups[groupId] ?? false;
-          const hasOverflow = groupedEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
+          const hasOverflow = regularEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
           const visibleEntries =
             hasOverflow && !isExpanded
-              ? groupedEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
-              : groupedEntries;
-          const hiddenCount = groupedEntries.length - visibleEntries.length;
-          const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
+              ? regularEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
+              : regularEntries;
+          const hiddenCount = regularEntries.length - visibleEntries.length;
+          const onlyToolEntries = regularEntries.every((entry) => entry.tone === "tool");
           const showHeader = hasOverflow || !onlyToolEntries;
           const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
 
           return (
-            <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
-              {showHeader && (
-                <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-                  <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-                    {groupLabel} ({groupedEntries.length})
-                  </p>
-                  {hasOverflow && (
-                    <button
-                      type="button"
-                      className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
-                      onClick={() => onToggleWorkGroup(groupId)}
-                    >
-                      {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
-                    </button>
+            <div className="space-y-2">
+              {regularEntries.length > 0 && (
+                <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
+                  {showHeader && (
+                    <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+                      <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
+                        {groupLabel} ({regularEntries.length})
+                      </p>
+                      {hasOverflow && (
+                        <button
+                          type="button"
+                          className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
+                          onClick={() => onToggleWorkGroup(groupId)}
+                        >
+                          {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
+                        </button>
+                      )}
+                    </div>
                   )}
+                  <div className="space-y-0.5">
+                    {visibleEntries.map((workEntry) => (
+                      <SimpleWorkEntryRow key={`work-row:${workEntry.id}`} workEntry={workEntry} />
+                    ))}
+                  </div>
                 </div>
               )}
-              <div className="space-y-0.5">
-                {visibleEntries.map((workEntry) => (
-                  <SimpleWorkEntryRow key={`work-row:${workEntry.id}`} workEntry={workEntry} />
-                ))}
-              </div>
+
+              {/* Agent panels — each agent gets its own fixed-height scrollable panel */}
+              {Array.from(agentGroups.entries()).map(([agentKey, agentEntries]) => {
+                const displayName = agentKey === "__unnamed_agent__" ? "Sub-agent" : agentKey;
+                const agentGroupId = `${groupId}:agent:${agentKey}`;
+                const isAgentExpanded = expandedWorkGroups[agentGroupId] ?? false;
+                const latestEntry = agentEntries[agentEntries.length - 1];
+                const isCompleted = latestEntry?.label?.includes("complete") ?? false;
+                const statusDot = isCompleted
+                  ? "bg-emerald-400/70"
+                  : "bg-amber-400/70 animate-pulse";
+
+                return (
+                  <div
+                    key={`agent-panel:${agentKey}`}
+                    className="rounded-lg border border-indigo-500/20 bg-indigo-950/10 dark:bg-indigo-950/20"
+                  >
+                    {/* Agent header */}
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+                      onClick={() => onToggleWorkGroup(agentGroupId)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
+                        <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-indigo-300/80 dark:text-indigo-300/70">
+                          {displayName}
+                        </p>
+                        <span className="text-[10px] text-muted-foreground/40">
+                          ({agentEntries.length} {agentEntries.length === 1 ? "event" : "events"})
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/50">
+                        {isAgentExpanded ? "Collapse" : "Expand"}
+                      </span>
+                    </button>
+
+                    {/* Agent activity log */}
+                    {isAgentExpanded && (
+                      <div className="max-h-[200px] overflow-y-auto border-t border-indigo-500/10 px-3 py-1.5">
+                        <div className="space-y-0.5">
+                          {agentEntries.map((workEntry) => (
+                            <div
+                              key={`agent-entry:${workEntry.id}`}
+                              className="flex items-start gap-2 py-0.5"
+                            >
+                              <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-indigo-400/30" />
+                              <p className="py-[1px] text-[10px] leading-relaxed text-muted-foreground/60">
+                                {workEntry.detail ? (
+                                  <span
+                                    className="font-mono"
+                                    title={workEntry.detail}
+                                  >
+                                    {workEntry.detail}
+                                  </span>
+                                ) : (
+                                  workEntry.label
+                                )}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Collapsed: show latest status */}
+                    {!isAgentExpanded && latestEntry && (
+                      <div className="border-t border-indigo-500/10 px-3 py-1.5">
+                        <p className="truncate text-[10px] font-mono text-muted-foreground/50">
+                          {latestEntry.detail ?? latestEntry.label}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           );
         })()}

@@ -181,6 +181,12 @@ const TOOL_DEFINITIONS = [
               "A detailed description of the task for the sub-agent. Be specific about what to do, " +
               "which files to look at, and what the expected outcome is.",
           },
+          name: {
+            type: "string",
+            description:
+              "A short, descriptive name for this sub-agent (e.g. 'test-runner', 'file-analyzer', 'docs-writer'). " +
+              "This is shown to the user to identify what the agent is doing.",
+          },
           cwd: {
             type: "string",
             description: "Working directory for the sub-agent (optional, defaults to parent session cwd).",
@@ -322,6 +328,7 @@ interface SubAgentProgressContext {
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly parentItemId: string;
+  readonly agentName: string;
   readonly emit: (event: ProviderRuntimeEvent) => void;
 }
 
@@ -330,7 +337,7 @@ function emitSubAgentProgress(
   detail: string,
   depth: number,
 ) {
-  const prefix = depth > 0 ? `[sub-agent L${depth}] ` : "[sub-agent] ";
+  const label = ctx.agentName || (depth > 0 ? `sub-agent-L${depth}` : "sub-agent");
   ctx.emit({
     ...makeEventBase(ctx.threadId, ctx.turnId, ctx.parentItemId),
     type: "item.updated",
@@ -338,7 +345,8 @@ function emitSubAgentProgress(
       itemType: "collab_agent_tool_call" as CanonicalItemType,
       status: "inProgress",
       title: "spawn_agent",
-      detail: `${prefix}${detail}`.slice(0, 180),
+      detail: `[${label}] ${detail}`.slice(0, 180),
+      data: { agentName: ctx.agentName, depth },
     },
   } as ProviderRuntimeEvent);
 }
@@ -359,16 +367,20 @@ async function runSubAgent(
   if (!apiKey) return "Error: GLM API key not configured.";
   const baseUrl = resolveBaseUrl();
 
-  progress?.emit({
-    ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
-    type: "item.updated",
-    payload: {
-      itemType: "collab_agent_tool_call" as CanonicalItemType,
-      status: "inProgress",
-      title: "spawn_agent",
-      detail: `[sub-agent] Starting: ${task.slice(0, 140)}`,
-    },
-  } as ProviderRuntimeEvent);
+  if (progress) {
+    const label = progress.agentName || "sub-agent";
+    progress.emit({
+      ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+      type: "item.updated",
+      payload: {
+        itemType: "collab_agent_tool_call" as CanonicalItemType,
+        status: "inProgress",
+        title: "spawn_agent",
+        detail: `[${label}] Starting: ${task.slice(0, 140)}`,
+        data: { agentName: progress.agentName, depth },
+      },
+    } as ProviderRuntimeEvent);
+  }
 
   const messages: ChatMessage[] = [
     {
@@ -909,27 +921,34 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
               }
             }
 
+            // For spawn_agent, extract name for event data
+            const isSpawnAgent = tc.function.name === "spawn_agent";
+            const agentName = isSpawnAgent ? String(parsedArgs.name ?? "") : "";
+            const agentData = isSpawnAgent ? { agentName } : undefined;
+
             // Emit item.started
             emit({
               ...makeEventBase(session.threadId, turnId, toolItemId),
               type: "item.started",
               payload: {
                 itemType: canonicalType,
-                title: tc.function.name,
+                title: isSpawnAgent && agentName ? `spawn_agent (${agentName})` : tc.function.name,
                 detail: toolDetail,
+                ...(agentData ? { data: agentData } : {}),
               },
             } as ProviderRuntimeEvent);
 
             // Execute
             let toolResult: string;
             try {
-              if (tc.function.name === "spawn_agent") {
+              if (isSpawnAgent) {
                 const subTask = String(parsedArgs.task ?? "");
                 const subCwd = parsedArgs.cwd ? String(parsedArgs.cwd) : session.cwd;
                 const progressCtx: SubAgentProgressContext = {
                   threadId: session.threadId,
                   turnId,
                   parentItemId: toolItemId,
+                  agentName,
                   emit,
                 };
                 toolResult = await runSubAgent(subTask, subCwd, session.model, signal, 0, progressCtx);
@@ -947,8 +966,9 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
               payload: {
                 itemType: canonicalType,
                 status: "completed",
-                title: tc.function.name,
+                title: isSpawnAgent && agentName ? `spawn_agent (${agentName})` : tc.function.name,
                 detail: toolDetail,
+                ...(agentData ? { data: agentData } : {}),
               },
             } as ProviderRuntimeEvent);
 

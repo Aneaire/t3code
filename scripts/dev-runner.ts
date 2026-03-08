@@ -1,6 +1,33 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
+
+// Load .env from monorepo root so keys like GLM_API_KEY are forwarded to child processes.
+(function loadDotenv() {
+  const envPath = resolve(import.meta.dirname ?? ".", "..", ".env");
+  try {
+    if (!existsSync(envPath)) return;
+    const content = readFileSync(envPath, "utf8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIndex = trimmed.indexOf("=");
+      if (eqIndex <= 0) continue;
+      const key = trimmed.slice(0, eqIndex).trim();
+      let value = trimmed.slice(eqIndex + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      if (!(key in process.env)) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // Best-effort.
+  }
+})();
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";

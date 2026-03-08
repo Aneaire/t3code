@@ -34,6 +34,38 @@ import {
 
 fixPath();
 
+// Load .env from the monorepo root (or app root in production) so that
+// keys like GLM_API_KEY are available to the backend child process.
+(function loadDotenv() {
+  const candidates = [
+    Path.resolve(__dirname, "../../..", ".env"),
+    Path.resolve(__dirname, "..", ".env"),
+  ];
+  for (const envPath of candidates) {
+    try {
+      if (!FS.existsSync(envPath)) continue;
+      const content = FS.readFileSync(envPath, "utf8");
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIndex = trimmed.indexOf("=");
+        if (eqIndex <= 0) continue;
+        const key = trimmed.slice(0, eqIndex).trim();
+        let value = trimmed.slice(eqIndex + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        if (!(key in process.env)) {
+          process.env[key] = value;
+        }
+      }
+      break;
+    } catch {
+      // Best-effort — skip if unreadable.
+    }
+  }
+})();
+
 const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
 const CONFIRM_CHANNEL = "desktop:confirm";
 const CONTEXT_MENU_CHANNEL = "desktop:context-menu";

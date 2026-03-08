@@ -17,6 +17,7 @@ export const PROVIDER_OPTIONS: Array<{
   label: string;
   available: boolean;
 }> = [
+  { value: "glm", label: "GLM (z.ai)", available: true },
   { value: "codex", label: "Codex", available: true },
   { value: "claudeCode", label: "Claude Code", available: false },
   { value: "cursor", label: "Cursor", available: false },

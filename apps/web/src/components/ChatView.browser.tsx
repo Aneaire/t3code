@@ -99,7 +99,7 @@ function createBaseServerConfig(): ServerConfig {
     issues: [],
     providers: [
       {
-        provider: "codex",
+        provider: "glm",
         status: "ready",
         available: true,
         authStatus: "authenticated",
@@ -220,7 +220,7 @@ function createSnapshotForTargetUser(options: {
         session: {
           threadId: THREAD_ID,
           status: "ready",
-          providerName: "codex",
+          providerName: "glm",
           runtimeMode: "full-access",
           activeTurnId: null,
           lastError: null,

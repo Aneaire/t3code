@@ -32,6 +32,8 @@ import type {
 const PROVIDER = "glm" as const;
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4";
 const MAX_AGENT_LOOP_ITERATIONS = 32;
+const MAX_SUB_AGENT_ITERATIONS = 16;
+const MAX_SUB_AGENT_DEPTH = 3;
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -160,6 +162,34 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "spawn_agent",
+      description:
+        "Spawn a sub-agent to handle a complex, self-contained task autonomously. " +
+        "The sub-agent gets its own conversation with the same tools and works independently. " +
+        "Use this to parallelize work or delegate tasks like: researching a codebase question, " +
+        "implementing a well-scoped feature, running and fixing tests, or refactoring a module. " +
+        "The sub-agent returns its final result as text.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description:
+              "A detailed description of the task for the sub-agent. Be specific about what to do, " +
+              "which files to look at, and what the expected outcome is.",
+          },
+          cwd: {
+            type: "string",
+            description: "Working directory for the sub-agent (optional, defaults to parent session cwd).",
+          },
+        },
+        required: ["task"],
+      },
+    },
+  },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -200,6 +230,8 @@ function toolCallToCanonicalItemType(toolName: string): CanonicalItemType {
     case "list_directory":
     case "search_files":
       return "file_change";
+    case "spawn_agent":
+      return "command_execution";
     default:
       return "unknown";
   }
@@ -282,6 +314,151 @@ async function executeToolCall(
     default:
       return `Unknown tool: ${toolName}`;
   }
+}
+
+// ── Sub-agent runner ──────────────────────────────────────────────
+
+async function runSubAgent(
+  task: string,
+  cwd: string,
+  model: string,
+  signal: AbortSignal,
+  depth: number,
+): Promise<string> {
+  if (depth >= MAX_SUB_AGENT_DEPTH) {
+    return "Error: Maximum sub-agent nesting depth reached.";
+  }
+
+  const apiKey = resolveApiKey();
+  if (!apiKey) return "Error: GLM API key not configured.";
+  const baseUrl = resolveBaseUrl();
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content:
+        `You are a focused sub-agent handling a specific task. ` +
+        `You have access to tools to read, write, and edit files, run commands, list directories, search files, and spawn further sub-agents. ` +
+        `The working directory is: ${cwd}\n\n` +
+        `Complete the task and provide a clear, concise summary of what you did and the result. ` +
+        `Do NOT ask questions — make reasonable decisions and proceed.`,
+    },
+    { role: "user", content: task },
+  ];
+
+  // Sub-agents can spawn further sub-agents but with reduced depth budget
+  const subAgentTools = TOOL_DEFINITIONS;
+  let finalResponse = "";
+
+  for (let iteration = 0; iteration < MAX_SUB_AGENT_ITERATIONS; iteration++) {
+    if (signal.aborted) return "Sub-agent interrupted.";
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          tools: subAgentTools,
+          stream: true,
+        }),
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) return "Sub-agent interrupted.";
+      return `Sub-agent API error: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      return `Sub-agent API error ${response.status}: ${errorBody.slice(0, 300)}`;
+    }
+
+    let assistantContent = "";
+    const toolCalls: Map<number, ToolCall> = new Map();
+
+    for await (const chunk of parseSseStream(response, signal)) {
+      const choice = chunk.choices?.[0];
+      if (!choice?.delta) continue;
+      if (choice.delta.content) {
+        assistantContent += choice.delta.content;
+      }
+      if (choice.delta.tool_calls) {
+        for (const tc of choice.delta.tool_calls) {
+          const existing = toolCalls.get(tc.index);
+          if (existing) {
+            if (tc.function?.arguments) {
+              existing.function.arguments += tc.function.arguments;
+            }
+          } else {
+            toolCalls.set(tc.index, {
+              id: tc.id ?? `sub-call-${tc.index}`,
+              type: "function",
+              function: {
+                name: tc.function?.name ?? "",
+                arguments: tc.function?.arguments ?? "",
+              },
+            });
+          }
+        }
+      }
+    }
+
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: assistantContent || null,
+    };
+    const resolvedToolCalls = Array.from(toolCalls.values());
+    if (resolvedToolCalls.length > 0) {
+      assistantMsg.tool_calls = resolvedToolCalls;
+    }
+    messages.push(assistantMsg);
+
+    // No tool calls — sub-agent is done
+    if (resolvedToolCalls.length === 0) {
+      finalResponse = assistantContent;
+      break;
+    }
+
+    // Execute tool calls
+    for (const tc of resolvedToolCalls) {
+      if (signal.aborted) return "Sub-agent interrupted.";
+
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        parsedArgs = {};
+      }
+
+      let toolResult: string;
+      if (tc.function.name === "spawn_agent") {
+        // Recursive sub-agent
+        const subTask = String(parsedArgs.task ?? "");
+        const subCwd = parsedArgs.cwd ? String(parsedArgs.cwd) : cwd;
+        toolResult = await runSubAgent(subTask, subCwd, model, signal, depth + 1);
+      } else {
+        try {
+          toolResult = await executeToolCall(tc.function.name, parsedArgs, cwd);
+        } catch (error) {
+          toolResult = `Error: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: toolResult.slice(0, 50_000),
+      });
+    }
+  }
+
+  return finalResponse || "Sub-agent completed without a final response.";
 }
 
 // ── SSE parser ────────────────────────────────────────────────────
@@ -685,7 +862,13 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
             // Execute
             let toolResult: string;
             try {
-              toolResult = await executeToolCall(tc.function.name, parsedArgs, session.cwd);
+              if (tc.function.name === "spawn_agent") {
+                const subTask = String(parsedArgs.task ?? "");
+                const subCwd = parsedArgs.cwd ? String(parsedArgs.cwd) : session.cwd;
+                toolResult = await runSubAgent(subTask, subCwd, session.model, signal, 0);
+              } else {
+                toolResult = await executeToolCall(tc.function.name, parsedArgs, session.cwd);
+              }
             } catch (error) {
               toolResult = `Error: ${error instanceof Error ? error.message : String(error)}`;
             }

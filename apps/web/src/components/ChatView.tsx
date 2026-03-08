@@ -4971,12 +4971,34 @@ const MessagesTimeline = memo(function MessagesTimeline({
               {Array.from(agentGroups.entries()).map(([agentKey, agentEntries]) => {
                 const displayName = agentKey === "__unnamed_agent__" ? "Sub-agent" : agentKey;
                 const agentGroupId = `${groupId}:agent:${agentKey}`;
-                const isAgentExpanded = expandedWorkGroups[agentGroupId] ?? false;
+                const isAgentExpanded = expandedWorkGroups[agentGroupId] ?? true;
                 const latestEntry = agentEntries[agentEntries.length - 1];
                 const isCompleted = latestEntry?.label?.includes("complete") ?? false;
+
+                // Find the latest summary or streaming response
+                let agentResponseText: string | undefined;
+                for (let ei = agentEntries.length - 1; ei >= 0; ei--) {
+                  const e = agentEntries[ei];
+                  if (e?.agentSummary) { agentResponseText = e.agentSummary; break; }
+                  if (e?.streamingResponse) { agentResponseText = e.streamingResponse; break; }
+                }
+                const isStreaming = !isCompleted && !!latestEntry?.streamingResponse;
+
                 const statusDot = isCompleted
                   ? "bg-emerald-400/70"
-                  : "bg-amber-400/70 animate-pulse";
+                  : isStreaming
+                    ? "bg-sky-400/70 animate-pulse"
+                    : "bg-amber-400/70 animate-pulse";
+                const statusLabel = isCompleted
+                  ? "Done"
+                  : isStreaming
+                    ? "Responding..."
+                    : "Working...";
+
+                // Separate activity entries from the response
+                const activityEntries = agentEntries.filter(
+                  (e) => !e.streamingResponse && !e.agentSummary,
+                );
 
                 return (
                   <div
@@ -4994,8 +5016,8 @@ const MessagesTimeline = memo(function MessagesTimeline({
                         <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-indigo-300/80 dark:text-indigo-300/70">
                           {displayName}
                         </p>
-                        <span className="text-[10px] text-muted-foreground/40">
-                          ({agentEntries.length} {agentEntries.length === 1 ? "event" : "events"})
+                        <span className="rounded-full bg-indigo-500/10 px-1.5 py-0.5 text-[9px] text-indigo-300/50">
+                          {statusLabel}
                         </span>
                       </div>
                       <span className="text-[10px] text-muted-foreground/50">
@@ -5003,39 +5025,63 @@ const MessagesTimeline = memo(function MessagesTimeline({
                       </span>
                     </button>
 
-                    {/* Agent activity log */}
                     {isAgentExpanded && (
-                      <div className="max-h-[200px] overflow-y-auto border-t border-indigo-500/10 px-3 py-1.5">
-                        <div className="space-y-0.5">
-                          {agentEntries.map((workEntry) => (
-                            <div
-                              key={`agent-entry:${workEntry.id}`}
-                              className="flex items-start gap-2 py-0.5"
-                            >
-                              <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-indigo-400/30" />
-                              <p className="py-[1px] text-[10px] leading-relaxed text-muted-foreground/60">
-                                {workEntry.detail ? (
-                                  <span
-                                    className="font-mono"
-                                    title={workEntry.detail}
-                                  >
-                                    {workEntry.detail}
-                                  </span>
-                                ) : (
-                                  workEntry.label
-                                )}
-                              </p>
+                      <div className="border-t border-indigo-500/10">
+                        {/* Activity log — scrollable fixed height */}
+                        {activityEntries.length > 0 && (
+                          <div className="max-h-[120px] overflow-y-auto px-3 py-1.5">
+                            <p className="mb-1 text-[9px] uppercase tracking-wider text-muted-foreground/30">
+                              Activity
+                            </p>
+                            <div className="space-y-0.5">
+                              {activityEntries.map((workEntry) => (
+                                <div
+                                  key={`agent-entry:${workEntry.id}`}
+                                  className="flex items-start gap-2 py-0.5"
+                                >
+                                  <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-indigo-400/30" />
+                                  <p className="py-[1px] text-[10px] leading-relaxed text-muted-foreground/60">
+                                    {workEntry.detail ? (
+                                      <span
+                                        className="font-mono"
+                                        title={workEntry.detail}
+                                      >
+                                        {workEntry.detail}
+                                      </span>
+                                    ) : (
+                                      workEntry.label
+                                    )}
+                                  </p>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          </div>
+                        )}
+
+                        {/* Agent response / summary — streamed in real-time */}
+                        {agentResponseText && (
+                          <div className={`max-h-[200px] overflow-y-auto border-t border-indigo-500/10 px-3 py-2 ${activityEntries.length > 0 ? "" : ""}`}>
+                            <p className="mb-1 text-[9px] uppercase tracking-wider text-muted-foreground/30">
+                              {isCompleted ? "Result" : "Responding"}
+                            </p>
+                            <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground/80">
+                              {agentResponseText}
+                              {isStreaming && (
+                                <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-indigo-400/60" />
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {/* Collapsed: show latest status */}
-                    {!isAgentExpanded && latestEntry && (
+                    {!isAgentExpanded && (
                       <div className="border-t border-indigo-500/10 px-3 py-1.5">
                         <p className="truncate text-[10px] font-mono text-muted-foreground/50">
-                          {latestEntry.detail ?? latestEntry.label}
+                          {agentResponseText
+                            ? agentResponseText.slice(0, 120) + (agentResponseText.length > 120 ? "..." : "")
+                            : latestEntry?.detail ?? latestEntry?.label ?? ""}
                         </p>
                       </div>
                     )}

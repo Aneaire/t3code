@@ -438,40 +438,14 @@ async function runSubAgent(
 
     let assistantContent = "";
     const toolCalls: Map<number, ToolCall> = new Map();
-    let hasToolCalls = false;
-    let lastStreamEmitAt = 0;
-    const STREAM_THROTTLE_MS = 150;
 
     for await (const chunk of parseSseStream(response, signal)) {
       const choice = chunk.choices?.[0];
       if (!choice?.delta) continue;
       if (choice.delta.content) {
         assistantContent += choice.delta.content;
-
-        // Stream the sub-agent's response text to the UI (throttled)
-        const now = Date.now();
-        if (progress && !hasToolCalls && now - lastStreamEmitAt >= STREAM_THROTTLE_MS) {
-          lastStreamEmitAt = now;
-          const label = progress.agentName || "sub-agent";
-          progress.emit({
-            ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
-            type: "item.updated",
-            payload: {
-              itemType: "collab_agent_tool_call" as CanonicalItemType,
-              status: "inProgress",
-              title: "spawn_agent",
-              detail: `[${label}] responding...`.slice(0, 180),
-              data: {
-                agentName: progress.agentName,
-                depth,
-                streamingResponse: assistantContent,
-              },
-            },
-          } as ProviderRuntimeEvent);
-        }
       }
       if (choice.delta.tool_calls) {
-        hasToolCalls = true;
         for (const tc of choice.delta.tool_calls) {
           const existing = toolCalls.get(tc.index);
           if (existing) {

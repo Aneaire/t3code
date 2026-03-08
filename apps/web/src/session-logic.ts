@@ -29,6 +29,8 @@ export interface WorkLogEntry {
   label: string;
   detail?: string;
   tone: "thinking" | "tool" | "info" | "error";
+  itemType?: string;
+  agentName?: string;
 }
 
 export interface PendingApproval {
@@ -410,6 +412,15 @@ export function deriveWorkLogEntries(
       };
       if (payload && typeof payload.detail === "string" && payload.detail.length > 0) {
         entry.detail = payload.detail;
+      }
+      if (payload && typeof payload.itemType === "string") {
+        entry.itemType = payload.itemType;
+      }
+      if (payload && typeof payload.data === "object" && payload.data !== null) {
+        const data = payload.data as Record<string, unknown>;
+        if (typeof data.agentName === "string" && data.agentName.length > 0) {
+          entry.agentName = data.agentName;
+        }
       }
       return entry;
     });

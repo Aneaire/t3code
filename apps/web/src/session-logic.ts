@@ -42,6 +42,10 @@ export interface WorkLogEntry {
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   agentName?: string;
+  /** Full summary text from a completed sub-agent. */
+  agentSummary?: string;
+  /** Partial streaming response text from a sub-agent in progress. */
+  streamingResponse?: string;
 }
 
 export interface PendingApproval {
@@ -458,6 +462,12 @@ export function deriveWorkLogEntries(
         const data = payload.data as Record<string, unknown>;
         if (typeof data.agentName === "string" && data.agentName.length > 0) {
           entry.agentName = data.agentName;
+        }
+        if (typeof data.summary === "string" && data.summary.length > 0) {
+          entry.agentSummary = data.summary;
+        }
+        if (typeof data.streamingResponse === "string" && data.streamingResponse.length > 0) {
+          entry.streamingResponse = data.streamingResponse;
         }
       }
       return entry;

@@ -389,7 +389,11 @@ async function runSubAgent(
         `You are a focused sub-agent handling a specific task. ` +
         `You have access to tools to read, write, and edit files, run commands, list directories, search files, and spawn further sub-agents. ` +
         `The working directory is: ${cwd}\n\n` +
-        `Complete the task and provide a clear, concise summary of what you did and the result. ` +
+        `Complete the task and then write a clear, detailed summary of:\n` +
+        `- What you did (files changed, commands run, etc.)\n` +
+        `- The outcome (success/failure, key findings)\n` +
+        `- Any issues encountered or things to note\n\n` +
+        `Your final response is shown directly to the user, so make it informative and well-formatted. ` +
         `Do NOT ask questions — make reasonable decisions and proceed.`,
     },
     { role: "user", content: task },
@@ -434,14 +438,40 @@ async function runSubAgent(
 
     let assistantContent = "";
     const toolCalls: Map<number, ToolCall> = new Map();
+    let hasToolCalls = false;
+    let lastStreamEmitAt = 0;
+    const STREAM_THROTTLE_MS = 150;
 
     for await (const chunk of parseSseStream(response, signal)) {
       const choice = chunk.choices?.[0];
       if (!choice?.delta) continue;
       if (choice.delta.content) {
         assistantContent += choice.delta.content;
+
+        // Stream the sub-agent's response text to the UI (throttled)
+        const now = Date.now();
+        if (progress && !hasToolCalls && now - lastStreamEmitAt >= STREAM_THROTTLE_MS) {
+          lastStreamEmitAt = now;
+          const label = progress.agentName || "sub-agent";
+          progress.emit({
+            ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+            type: "item.updated",
+            payload: {
+              itemType: "collab_agent_tool_call" as CanonicalItemType,
+              status: "inProgress",
+              title: "spawn_agent",
+              detail: `[${label}] responding...`.slice(0, 180),
+              data: {
+                agentName: progress.agentName,
+                depth,
+                streamingResponse: assistantContent,
+              },
+            },
+          } as ProviderRuntimeEvent);
+        }
       }
       if (choice.delta.tool_calls) {
+        hasToolCalls = true;
         for (const tc of choice.delta.tool_calls) {
           const existing = toolCalls.get(tc.index);
           if (existing) {
@@ -476,7 +506,23 @@ async function runSubAgent(
     if (resolvedToolCalls.length === 0) {
       finalResponse = assistantContent;
       if (progress) {
-        emitSubAgentProgress(progress, `Completed after ${iteration + 1} iteration(s)`, depth);
+        // Emit final completion with the full summary
+        const label = progress.agentName || "sub-agent";
+        progress.emit({
+          ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+          type: "item.updated",
+          payload: {
+            itemType: "collab_agent_tool_call" as CanonicalItemType,
+            status: "completed" as const,
+            title: "spawn_agent",
+            detail: `[${label}] Completed after ${iteration + 1} iteration(s)`,
+            data: {
+              agentName: progress.agentName,
+              depth,
+              summary: assistantContent,
+            },
+          },
+        } as ProviderRuntimeEvent);
       }
       break;
     }
@@ -635,7 +681,16 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
             messages: [
               {
                 role: "system",
-                content: `You are a helpful coding assistant. You have access to tools to read, write, and edit files, run commands, list directories, and search files. The working directory is: ${cwd}`,
+                content:
+                  `You are a helpful coding assistant and orchestrator. The working directory is: ${cwd}\n\n` +
+                  `You have access to tools to read, write, and edit files, run commands, list directories, search files, and spawn sub-agents.\n\n` +
+                  `## Orchestration Guidelines\n` +
+                  `When facing complex tasks that involve multiple files or steps, act as a **manager**:\n` +
+                  `1. **Plan first** — briefly explain to the user what you're about to do and which agents you'll create.\n` +
+                  `2. **Delegate** — use \`spawn_agent\` with a clear, descriptive \`name\` (e.g. "test-runner", "schema-migrator") and a detailed \`task\`.\n` +
+                  `3. **Summarize** — after all agents complete, synthesize their results into a clear summary for the user.\n\n` +
+                  `Always give each agent a unique, descriptive name so the user can track what each agent is working on.\n` +
+                  `Prefer spawning focused agents for distinct sub-tasks rather than one agent for everything.`,
               },
             ],
             activeTurnAbort: null,

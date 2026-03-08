@@ -4700,10 +4700,18 @@ function AgentPanel({
       ? "Responding..."
       : "Working...";
 
-  // Separate activity entries from the response
-  const activityEntries = agentEntries.filter(
-    (e) => !e.streamingResponse && !e.agentSummary,
-  );
+  // Separate task description, activity entries, and response entries
+  let taskDescription: string | undefined;
+  const activityEntries: TimelineWorkEntry[] = [];
+  for (const e of agentEntries) {
+    if (e.streamingResponse || e.agentSummary) continue;
+    // The "Starting:" entry contains the task — extract and show as header
+    if (!taskDescription && e.detail?.includes("] Starting: ")) {
+      taskDescription = e.detail.replace(/^\[[^\]]*\]\s*Starting:\s*/, "");
+      continue;
+    }
+    activityEntries.push(e);
+  }
 
   // Auto-scroll refs
   const activityScrollRef = useRef<HTMLDivElement>(null);
@@ -4743,8 +4751,17 @@ function AgentPanel({
         </span>
       </button>
 
+      {/* Task description — always visible below header */}
+      {taskDescription && (
+        <div className="border-t border-indigo-500/10 px-3 py-1.5">
+          <p className="text-[10px] leading-relaxed text-muted-foreground/50">
+            {taskDescription}
+          </p>
+        </div>
+      )}
+
       {isExpanded && (
-        <div className="border-t border-indigo-500/10">
+        <div className={taskDescription ? "" : "border-t border-indigo-500/10"}>
           {/* Activity log — scrollable fixed height, auto-scrolls */}
           {activityEntries.length > 0 && (
             <div ref={activityScrollRef} className="max-h-[120px] overflow-y-auto px-3 py-1.5">

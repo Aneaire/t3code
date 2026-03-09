@@ -26,6 +26,7 @@ import {
   getDefaultModel,
   getDefaultReasoningEffort,
   getReasoningEffortOptions,
+  inferProviderFromModel,
   normalizeModelSlug,
   resolveModelSlugForProvider,
 } from "@t3tools/shared/model";
@@ -774,12 +775,18 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? selectedProviderByThreadId ?? null)
     : null;
-  const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? "glm";
+  const inferredProvider = inferProviderFromModel(activeThread?.model ?? activeProject?.model);
+  const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? inferredProvider;
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider = selectedProvider === "glm" ? settings.customGlmModels : settings.customCodexModels;
+  const customModelsForSelectedProvider =
+    selectedProvider === "claude"
+      ? settings.customClaudeModels
+      : selectedProvider === "glm"
+        ? settings.customGlmModels
+        : settings.customCodexModels;
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     if (!draftModel) {
@@ -2999,9 +3006,15 @@ export default function ChatView({ threadId }: ChatViewProps) {
         return;
       }
       setComposerDraftProvider(activeThread.id, provider);
+      const customModels =
+        provider === "claude"
+          ? settings.customClaudeModels
+          : provider === "glm"
+            ? settings.customGlmModels
+            : settings.customCodexModels;
       setComposerDraftModel(
         activeThread.id,
-        resolveAppModelSelection(provider, settings.customCodexModels, model),
+        resolveAppModelSelection(provider, customModels, model),
       );
       scheduleComposerFocus();
     },
@@ -3012,6 +3025,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftModel,
       setComposerDraftProvider,
       settings.customCodexModels,
+      settings.customGlmModels,
+      settings.customClaudeModels,
     ],
   );
   const onEffortSelect = useCallback(
@@ -5383,7 +5398,7 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
   label: string;
   available: true;
 } {
-  return option.available && option.value !== "claudeCode";
+  return option.available && option.value !== "cursor";
 }
 
 const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
@@ -5396,17 +5411,19 @@ const COMING_SOON_PROVIDER_OPTIONS = [
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
   customGlmModels: readonly string[];
+  customClaudeModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
     glm: getAppModelOptions("glm", settings.customGlmModels),
+    claude: getAppModelOptions("claude", settings.customClaudeModels),
   };
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
   codex: OpenAI,
   glm: GlmIcon,
-  claudeCode: ClaudeAI,
+  claude: ClaudeAI,
   cursor: CursorIcon,
 };
 
@@ -5548,7 +5565,7 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 aria-hidden="true"
                 className={cn(
                   "size-4 shrink-0 opacity-80",
-                  option.value === "claudeCode" ? "" : "text-muted-foreground/85",
+                  option.value === "cursor" ? "text-muted-foreground/85" : "",
                 )}
               />
               <span>{option.label}</span>

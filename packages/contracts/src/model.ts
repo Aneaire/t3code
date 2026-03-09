@@ -13,9 +13,13 @@ export type CodexModelOptions = typeof CodexModelOptions.Type;
 export const GlmModelOptions = Schema.Struct({});
 export type GlmModelOptions = typeof GlmModelOptions.Type;
 
+export const ClaudeModelOptions = Schema.Struct({});
+export type ClaudeModelOptions = typeof ClaudeModelOptions.Type;
+
 export const ProviderModelOptions = Schema.Struct({
   codex: Schema.optional(CodexModelOptions),
   glm: Schema.optional(GlmModelOptions),
+  claude: Schema.optional(ClaudeModelOptions),
 });
 export type ProviderModelOptions = typeof ProviderModelOptions.Type;
 
@@ -37,6 +41,11 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
     { slug: "glm-4.7-flash", name: "GLM 4.7 Flash" },
     { slug: "glm-5", name: "GLM 5" },
   ],
+  claude: [
+    { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+    { slug: "claude-opus-4-6", name: "Claude Opus 4.6" },
+    { slug: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5" },
+  ],
 } as const satisfies Record<ProviderKind, readonly ModelOption[]>;
 export type ModelOptionsByProvider = typeof MODEL_OPTIONS_BY_PROVIDER;
 
@@ -46,6 +55,7 @@ export type ModelSlug = BuiltInModelSlug | (string & {});
 export const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.4",
   glm: "glm-4.7",
+  claude: "claude-sonnet-4-6",
 } as const satisfies Record<ProviderKind, ModelSlug>;
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER = {
@@ -61,14 +71,24 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER = {
     "4.7": "glm-4.7",
     "5": "glm-5",
   },
+  claude: {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet-4.6": "claude-sonnet-4-6",
+    "opus-4.6": "claude-opus-4-6",
+    "haiku-4.5": "claude-haiku-4-5-20251001",
+  },
 } as const satisfies Record<ProviderKind, Record<string, ModelSlug>>;
 
 export const REASONING_EFFORT_OPTIONS_BY_PROVIDER = {
   codex: CODEX_REASONING_EFFORT_OPTIONS,
   glm: [],
+  claude: [],
 } as const satisfies Record<ProviderKind, readonly CodexReasoningEffort[]>;
 
 export const DEFAULT_REASONING_EFFORT_BY_PROVIDER = {
   codex: "high",
   glm: null,
+  claude: null,
 } as const satisfies Record<ProviderKind, CodexReasoningEffort | null>;

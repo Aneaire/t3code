@@ -20,6 +20,7 @@ const RuntimeEventRawSource = Schema.Literals([
   "codex.app-server.request",
   "codex.eventmsg",
   "codex.sdk.thread-event",
+  "claude.sdk.stream-json",
 ]);
 export type RuntimeEventRawSource = typeof RuntimeEventRawSource.Type;
 
@@ -104,6 +105,7 @@ export const CanonicalItemType = Schema.Literals([
   "reasoning",
   "plan",
   "command_execution",
+  "file_read",
   "file_change",
   "mcp_tool_call",
   "dynamic_tool_call",

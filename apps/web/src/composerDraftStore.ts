@@ -216,14 +216,17 @@ const REASONING_EFFORT_VALUES = new Set<CodexReasoningEffort>(
   REASONING_EFFORT_OPTIONS_BY_PROVIDER.codex,
 );
 
-function createEmptyThreadDraft(): ComposerThreadDraftState {
+function createEmptyThreadDraft(lastSelected?: {
+  lastSelectedProvider: ProviderKind | null;
+  lastSelectedModel: string | null;
+}): ComposerThreadDraftState {
   return {
     prompt: "",
     images: [],
     nonPersistedImageIds: [],
     persistedAttachments: [],
-    provider: null,
-    model: null,
+    provider: lastSelected?.lastSelectedProvider ?? null,
+    model: lastSelected?.lastSelectedModel ?? null,
     runtimeMode: null,
     interactionMode: null,
     effort: null,
@@ -237,13 +240,18 @@ function composerImageDedupKey(image: ComposerImageAttachment): string {
   return `${image.mimeType}\u0000${image.sizeBytes}\u0000${image.name}`;
 }
 
-function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
+function shouldRemoveDraft(
+  draft: ComposerThreadDraftState,
+  lastSelected?: { lastSelectedProvider: ProviderKind | null; lastSelectedModel: string | null },
+): boolean {
+  const isDefaultProvider = draft.provider === null || draft.provider === (lastSelected?.lastSelectedProvider ?? null);
+  const isDefaultModel = draft.model === null || draft.model === (lastSelected?.lastSelectedModel ?? null);
   return (
     draft.prompt.length === 0 &&
     draft.images.length === 0 &&
     draft.persistedAttachments.length === 0 &&
-    draft.provider === null &&
-    draft.model === null &&
+    isDefaultProvider &&
+    isDefaultModel &&
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
     draft.effort === null &&
@@ -819,13 +827,13 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           return;
         }
         set((state) => {
-          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
+          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft(state);
           const nextDraft: ComposerThreadDraftState = {
             ...existing,
             prompt,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -845,13 +853,13 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
               ? { lastSelectedProvider: normalizedProvider }
               : state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           const nextDraft: ComposerThreadDraftState = {
             ...base,
             provider: normalizedProvider,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -874,7 +882,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
               ? { lastSelectedModel: normalizedModel }
               : state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           if (base.model === normalizedModel) {
             return state;
           }
@@ -883,7 +891,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             model: normalizedModel,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -905,7 +913,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!existing && nextRuntimeMode === null) {
             return state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           if (base.runtimeMode === nextRuntimeMode) {
             return state;
           }
@@ -914,7 +922,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             runtimeMode: nextRuntimeMode,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -933,7 +941,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!existing && nextInteractionMode === null) {
             return state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           if (base.interactionMode === nextInteractionMode) {
             return state;
           }
@@ -942,7 +950,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             interactionMode: nextInteractionMode,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -965,7 +973,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!existing && nextEffort === null) {
             return state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           if (base.effort === nextEffort) {
             return state;
           }
@@ -974,7 +982,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             effort: nextEffort,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -992,7 +1000,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (!existing && nextCodexFastMode === false) {
             return state;
           }
-          const base = existing ?? createEmptyThreadDraft();
+          const base = existing ?? createEmptyThreadDraft(state);
           if (base.codexFastMode === nextCodexFastMode) {
             return state;
           }
@@ -1001,7 +1009,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             codexFastMode: nextCodexFastMode,
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -1020,7 +1028,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           return;
         }
         set((state) => {
-          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
+          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft(state);
           const existingIds = new Set(existing.images.map((image) => image.id));
           const existingDedupKeys = new Set(
             existing.images.map((image) => composerImageDedupKey(image)),
@@ -1081,7 +1089,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             ),
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -1104,7 +1112,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             nonPersistedImageIds: [],
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -1131,7 +1139,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             ),
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -1158,7 +1166,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
               nonPersistedImageIds,
             };
             const nextDraftsByThreadId = { ...state.draftsByThreadId };
-            if (shouldRemoveDraft(nextDraft)) {
+            if (shouldRemoveDraft(nextDraft, state)) {
               delete nextDraftsByThreadId[threadId];
             } else {
               nextDraftsByThreadId[threadId] = nextDraft;
@@ -1184,7 +1192,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             persistedAttachments: [],
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
-          if (shouldRemoveDraft(nextDraft)) {
+          if (shouldRemoveDraft(nextDraft, state)) {
             delete nextDraftsByThreadId[threadId];
           } else {
             nextDraftsByThreadId[threadId] = nextDraft;
@@ -1241,8 +1249,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           if (
             draft.prompt.length === 0 &&
             draft.persistedAttachments.length === 0 &&
-            draft.provider === null &&
-            draft.model === null &&
+            (draft.provider === null || draft.provider === state.lastSelectedProvider) &&
+            (draft.model === null || draft.model === state.lastSelectedModel) &&
             draft.runtimeMode === null &&
             draft.interactionMode === null &&
             draft.effort === null &&

@@ -644,15 +644,15 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
       const streamEvents: GlmAdapterShape["streamEvents"] =
         Stream.fromQueue(eventQueue);
 
-      const getSession = (threadId: ThreadId): GlmSession => {
+      const getSession = (threadId: ThreadId): Effect.Effect<GlmSession, ProviderAdapterSessionNotFoundError> => {
         const session = sessions.get(threadId);
         if (!session) {
-          throw new ProviderAdapterSessionNotFoundError({
+          return Effect.fail(new ProviderAdapterSessionNotFoundError({
             provider: PROVIDER,
             threadId,
-          });
+          }));
         }
-        return session;
+        return Effect.succeed(session);
       };
 
       const capabilities: ProviderAdapterCapabilities = {
@@ -1079,8 +1079,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
       };
 
       const sendTurn: GlmAdapterShape["sendTurn"] = (input) =>
-        Effect.sync(() => {
-          const session = getSession(input.threadId);
+        Effect.gen(function* () {
+          const session = yield* getSession(input.threadId);
           const turnId = TurnId.makeUnsafe(`turn-${nextEventId()}`);
 
           if (input.model) {
@@ -1127,8 +1127,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
         });
 
       const interruptTurn: GlmAdapterShape["interruptTurn"] = (threadId) =>
-        Effect.sync(() => {
-          const session = getSession(threadId);
+        Effect.gen(function* () {
+          const session = yield* getSession(threadId);
           if (session.activeTurnAbort) {
             session.activeTurnAbort.abort();
             session.activeTurnAbort = null;
@@ -1145,8 +1145,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
         _requestId,
         decision,
       ) =>
-        Effect.sync(() => {
-          const session = getSession(threadId);
+        Effect.gen(function* () {
+          const session = yield* getSession(threadId);
           if (session.pendingApproval) {
             session.pendingApproval.resolve(decision);
           }
@@ -1197,8 +1197,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
         Effect.sync(() => sessions.has(threadId));
 
       const readThread: GlmAdapterShape["readThread"] = (threadId) =>
-        Effect.sync(() => {
-          getSession(threadId);
+        Effect.gen(function* () {
+          yield* getSession(threadId);
           return {
             threadId,
             turns: [],
@@ -1206,8 +1206,8 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
         });
 
       const rollbackThread: GlmAdapterShape["rollbackThread"] = (threadId, numTurns) =>
-        Effect.sync(() => {
-          const session = getSession(threadId);
+        Effect.gen(function* () {
+          const session = yield* getSession(threadId);
           // Simple rollback: remove last N user+assistant message pairs
           for (let i = 0; i < numTurns; i++) {
             while (session.messages.length > 1) {

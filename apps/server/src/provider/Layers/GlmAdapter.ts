@@ -32,6 +32,8 @@ import type {
 const PROVIDER = "glm" as const;
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4";
 const MAX_AGENT_LOOP_ITERATIONS = 32;
+const MAX_SUB_AGENT_ITERATIONS = 16;
+const MAX_SUB_AGENT_DEPTH = 3;
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -160,6 +162,40 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "spawn_agent",
+      description:
+        "Spawn a sub-agent to handle a complex, self-contained task autonomously. " +
+        "The sub-agent gets its own conversation with the same tools and works independently. " +
+        "Use this to parallelize work or delegate tasks like: researching a codebase question, " +
+        "implementing a well-scoped feature, running and fixing tests, or refactoring a module. " +
+        "The sub-agent returns its final result as text.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description:
+              "A detailed description of the task for the sub-agent. Be specific about what to do, " +
+              "which files to look at, and what the expected outcome is.",
+          },
+          name: {
+            type: "string",
+            description:
+              "A short, descriptive name for this sub-agent (e.g. 'test-runner', 'file-analyzer', 'docs-writer'). " +
+              "This is shown to the user to identify what the agent is doing.",
+          },
+          cwd: {
+            type: "string",
+            description: "Working directory for the sub-agent (optional, defaults to parent session cwd).",
+          },
+        },
+        required: ["task"],
+      },
+    },
+  },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -200,6 +236,8 @@ function toolCallToCanonicalItemType(toolName: string): CanonicalItemType {
     case "list_directory":
     case "search_files":
       return "file_change";
+    case "spawn_agent":
+      return "collab_agent_tool_call";
     default:
       return "unknown";
   }
@@ -282,6 +320,254 @@ async function executeToolCall(
     default:
       return `Unknown tool: ${toolName}`;
   }
+}
+
+// ── Sub-agent runner ──────────────────────────────────────────────
+
+interface SubAgentProgressContext {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly parentItemId: string;
+  readonly agentName: string;
+  readonly emit: (event: ProviderRuntimeEvent) => void;
+}
+
+function emitSubAgentProgress(
+  ctx: SubAgentProgressContext,
+  detail: string,
+  depth: number,
+) {
+  const label = ctx.agentName || (depth > 0 ? `sub-agent-L${depth}` : "sub-agent");
+  ctx.emit({
+    ...makeEventBase(ctx.threadId, ctx.turnId, ctx.parentItemId),
+    type: "item.updated",
+    payload: {
+      itemType: "collab_agent_tool_call" as CanonicalItemType,
+      status: "inProgress",
+      title: "spawn_agent",
+      detail: `[${label}] ${detail}`.slice(0, 180),
+      data: { agentName: ctx.agentName, depth },
+    },
+  } as ProviderRuntimeEvent);
+}
+
+async function runSubAgent(
+  task: string,
+  cwd: string,
+  model: string,
+  signal: AbortSignal,
+  depth: number,
+  progress?: SubAgentProgressContext,
+): Promise<string> {
+  if (depth >= MAX_SUB_AGENT_DEPTH) {
+    return "Error: Maximum sub-agent nesting depth reached.";
+  }
+
+  const apiKey = resolveApiKey();
+  if (!apiKey) return "Error: GLM API key not configured.";
+  const baseUrl = resolveBaseUrl();
+
+  if (progress) {
+    const label = progress.agentName || "sub-agent";
+    progress.emit({
+      ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+      type: "item.updated",
+      payload: {
+        itemType: "collab_agent_tool_call" as CanonicalItemType,
+        status: "inProgress",
+        title: "spawn_agent",
+        detail: `[${label}] Starting: ${task.slice(0, 140)}`,
+        data: { agentName: progress.agentName, depth },
+      },
+    } as ProviderRuntimeEvent);
+  }
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content:
+        `You are a focused sub-agent handling a specific task. ` +
+        `You have access to tools to read, write, and edit files, run commands, list directories, search files, and spawn further sub-agents. ` +
+        `The working directory is: ${cwd}\n\n` +
+        `Complete the task and then write a clear, detailed summary of:\n` +
+        `- What you did (files changed, commands run, etc.)\n` +
+        `- The outcome (success/failure, key findings)\n` +
+        `- Any issues encountered or things to note\n\n` +
+        `Your final response is shown directly to the user, so make it informative and well-formatted. ` +
+        `Do NOT ask questions — make reasonable decisions and proceed.`,
+    },
+    { role: "user", content: task },
+  ];
+
+  // Sub-agents can spawn further sub-agents but with reduced depth budget
+  const subAgentTools = TOOL_DEFINITIONS;
+  let finalResponse = "";
+
+  for (let iteration = 0; iteration < MAX_SUB_AGENT_ITERATIONS; iteration++) {
+    if (signal.aborted) return "Sub-agent interrupted.";
+
+    if (progress) {
+      emitSubAgentProgress(progress, `Iteration ${iteration + 1}/${MAX_SUB_AGENT_ITERATIONS} — thinking...`, depth);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          tools: subAgentTools,
+          stream: true,
+        }),
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) return "Sub-agent interrupted.";
+      return `Sub-agent API error: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      return `Sub-agent API error ${response.status}: ${errorBody.slice(0, 300)}`;
+    }
+
+    let assistantContent = "";
+    const toolCalls: Map<number, ToolCall> = new Map();
+
+    for await (const chunk of parseSseStream(response, signal)) {
+      const choice = chunk.choices?.[0];
+      if (!choice?.delta) continue;
+      if (choice.delta.content) {
+        assistantContent += choice.delta.content;
+      }
+      if (choice.delta.tool_calls) {
+        for (const tc of choice.delta.tool_calls) {
+          const existing = toolCalls.get(tc.index);
+          if (existing) {
+            if (tc.function?.arguments) {
+              existing.function.arguments += tc.function.arguments;
+            }
+          } else {
+            toolCalls.set(tc.index, {
+              id: tc.id ?? `sub-call-${tc.index}`,
+              type: "function",
+              function: {
+                name: tc.function?.name ?? "",
+                arguments: tc.function?.arguments ?? "",
+              },
+            });
+          }
+        }
+      }
+    }
+
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: assistantContent || null,
+    };
+    const resolvedToolCalls = Array.from(toolCalls.values());
+    if (resolvedToolCalls.length > 0) {
+      assistantMsg.tool_calls = resolvedToolCalls;
+    }
+    messages.push(assistantMsg);
+
+    // No tool calls — sub-agent is done
+    if (resolvedToolCalls.length === 0) {
+      finalResponse = assistantContent;
+      if (progress) {
+        const label = progress.agentName || "sub-agent";
+        // Flush the full streamed response (throttle may have skipped the last chunk)
+        if (assistantContent) {
+          progress.emit({
+            ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+            type: "item.updated",
+            payload: {
+              itemType: "collab_agent_tool_call" as CanonicalItemType,
+              status: "inProgress",
+              title: "spawn_agent",
+              detail: `[${label}] responding...`.slice(0, 180),
+              data: {
+                agentName: progress.agentName,
+                depth,
+                streamingResponse: assistantContent,
+              },
+            },
+          } as ProviderRuntimeEvent);
+        }
+        // Emit final completion with the full summary
+        progress.emit({
+          ...makeEventBase(progress.threadId, progress.turnId, progress.parentItemId),
+          type: "item.updated",
+          payload: {
+            itemType: "collab_agent_tool_call" as CanonicalItemType,
+            status: "completed" as const,
+            title: "spawn_agent",
+            detail: `[${label}] Completed after ${iteration + 1} iteration(s)`,
+            data: {
+              agentName: progress.agentName,
+              depth,
+              summary: assistantContent,
+            },
+          },
+        } as ProviderRuntimeEvent);
+      }
+      break;
+    }
+
+    // Execute tool calls
+    for (const tc of resolvedToolCalls) {
+      if (signal.aborted) return "Sub-agent interrupted.";
+
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        parsedArgs = {};
+      }
+
+      // Emit progress for each tool the sub-agent uses
+      if (progress) {
+        const toolBrief =
+          tc.function.name === "run_command"
+            ? `run_command: ${String(parsedArgs.command ?? "").slice(0, 80)}`
+            : tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file"
+              ? `${tc.function.name}: ${String(parsedArgs.path ?? "").slice(0, 80)}`
+              : tc.function.name === "search_files"
+                ? `search_files: ${String(parsedArgs.pattern ?? "").slice(0, 80)}`
+                : tc.function.name === "spawn_agent"
+                  ? `spawn_agent: ${String(parsedArgs.task ?? "").slice(0, 60)}`
+                  : tc.function.name;
+        emitSubAgentProgress(progress, toolBrief, depth);
+      }
+
+      let toolResult: string;
+      if (tc.function.name === "spawn_agent") {
+        // Recursive sub-agent
+        const subTask = String(parsedArgs.task ?? "");
+        const subCwd = parsedArgs.cwd ? String(parsedArgs.cwd) : cwd;
+        toolResult = await runSubAgent(subTask, subCwd, model, signal, depth + 1, progress);
+      } else {
+        try {
+          toolResult = await executeToolCall(tc.function.name, parsedArgs, cwd);
+        } catch (error) {
+          toolResult = `Error: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: toolResult.slice(0, 50_000),
+      });
+    }
+  }
+
+  return finalResponse || "Sub-agent completed without a final response.";
 }
 
 // ── SSE parser ────────────────────────────────────────────────────
@@ -388,9 +674,15 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
               {
                 role: "system",
                 content:
-                  `You are a helpful coding assistant. The working directory is: ${cwd}\n\n` +
-                  `You have access to tools to read, write, and edit files, run commands, list directories, and search files.\n\n` +
-                  `When facing complex tasks, plan your approach step by step and use the available tools to accomplish the task.`,
+                  `You are a helpful coding assistant and orchestrator. The working directory is: ${cwd}\n\n` +
+                  `You have access to tools to read, write, and edit files, run commands, list directories, search files, and spawn sub-agents.\n\n` +
+                  `## Orchestration Guidelines\n` +
+                  `When facing complex tasks that involve multiple files or steps, act as a **manager**:\n` +
+                  `1. **Plan first** — briefly explain to the user what you're about to do and which agents you'll create.\n` +
+                  `2. **Delegate** — use \`spawn_agent\` with a clear, descriptive \`name\` (e.g. "test-runner", "schema-migrator") and a detailed \`task\`.\n` +
+                  `3. **Summarize** — after all agents complete, synthesize their results into a clear summary for the user.\n\n` +
+                  `Always give each agent a unique, descriptive name so the user can track what each agent is working on.\n` +
+                  `Prefer spawning focused agents for distinct sub-tasks rather than one agent for everything.`,
               },
             ],
             activeTurnAbort: null,
@@ -621,42 +913,66 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
             } as ProviderRuntimeEvent);
           }
 
-          // Execute tool calls sequentially
-          for (const tc of resolvedToolCalls) {
-            if (signal.aborted) break;
+          // Prepare all tool calls with parsed args and metadata
+          type PreparedToolCall = {
+            tc: ToolCall;
+            parsedArgs: Record<string, unknown>;
+            toolItemId: string;
+            canonicalType: CanonicalItemType;
+            toolDetail: string;
+            isSpawnAgent: boolean;
+            agentName: string;
+          };
 
+          const prepared: PreparedToolCall[] = resolvedToolCalls.map((tc) => {
             let parsedArgs: Record<string, unknown> = {};
             try { parsedArgs = JSON.parse(tc.function.arguments); } catch { parsedArgs = {}; }
             const toolItemId = `tool-${tc.id}`;
             const canonicalType = toolCallToCanonicalItemType(tc.function.name);
+            const isSpawnAgent = tc.function.name === "spawn_agent";
+            const agentName = isSpawnAgent ? String(parsedArgs.name ?? "") : "";
             const toolDetail =
               tc.function.name === "run_command"
                 ? String(parsedArgs.command ?? "")
                 : tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file"
                   ? String(parsedArgs.path ?? "")
-                  : tc.function.name;
+                  : isSpawnAgent
+                    ? String(parsedArgs.task ?? "").slice(0, 120)
+                    : tc.function.name;
+            return { tc, parsedArgs, toolItemId, canonicalType, toolDetail, isSpawnAgent, agentName };
+          });
+
+          // Split into spawn_agent calls (run in parallel) and other tools (run sequentially)
+          const spawnAgentCalls = prepared.filter((p) => p.isSpawnAgent);
+          const otherToolCalls = prepared.filter((p) => !p.isSpawnAgent);
+
+          // Helper to execute a single prepared tool call
+          const executePrepared = async (p: PreparedToolCall): Promise<void> => {
+            if (signal.aborted) return;
+
+            const agentData = p.isSpawnAgent ? { agentName: p.agentName } : undefined;
 
             // Approval flow for write/execute operations in approval-required mode
             if (
               session.runtimeMode === "approval-required" &&
-              (tc.function.name === "write_file" ||
-                tc.function.name === "edit_file" ||
-                tc.function.name === "run_command")
+              (p.tc.function.name === "write_file" ||
+                p.tc.function.name === "edit_file" ||
+                p.tc.function.name === "run_command")
             ) {
               const requestId = `req-${nextEventId()}`;
               const requestType =
-                tc.function.name === "run_command"
+                p.tc.function.name === "run_command"
                   ? "exec_command_approval"
                   : "file_change_approval";
 
               emit({
-                ...makeEventBase(session.threadId, turnId, toolItemId),
+                ...makeEventBase(session.threadId, turnId, p.toolItemId),
                 type: "request.opened",
                 requestId: RuntimeRequestId.makeUnsafe(requestId),
                 payload: {
                   requestType,
-                  detail: toolDetail,
-                  args: parsedArgs,
+                  detail: p.toolDetail,
+                  args: p.parsedArgs,
                 },
               } as ProviderRuntimeEvent);
 
@@ -666,7 +982,7 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
               session.pendingApproval = null;
 
               emit({
-                ...makeEventBase(session.threadId, turnId, toolItemId),
+                ...makeEventBase(session.threadId, turnId, p.toolItemId),
                 type: "request.resolved",
                 requestId: RuntimeRequestId.makeUnsafe(requestId),
                 payload: {
@@ -678,49 +994,75 @@ export function makeGlmAdapterLive(_options?: GlmAdapterLiveOptions) {
               if (decision === "decline" || decision === "cancel") {
                 session.messages.push({
                   role: "tool",
-                  tool_call_id: tc.id,
+                  tool_call_id: p.tc.id,
                   content: "Operation declined by user.",
                 });
-                continue;
+                return;
               }
             }
 
             // Emit item.started
             emit({
-              ...makeEventBase(session.threadId, turnId, toolItemId),
+              ...makeEventBase(session.threadId, turnId, p.toolItemId),
               type: "item.started",
               payload: {
-                itemType: canonicalType,
-                title: tc.function.name,
-                detail: toolDetail,
+                itemType: p.canonicalType,
+                title: p.isSpawnAgent && p.agentName ? `spawn_agent (${p.agentName})` : p.tc.function.name,
+                detail: p.toolDetail,
+                ...(agentData ? { data: agentData } : {}),
               },
             } as ProviderRuntimeEvent);
 
             // Execute
             let toolResult: string;
             try {
-              toolResult = await executeToolCall(tc.function.name, parsedArgs, session.cwd);
+              if (p.isSpawnAgent) {
+                const subTask = String(p.parsedArgs.task ?? "");
+                const subCwd = p.parsedArgs.cwd ? String(p.parsedArgs.cwd) : session.cwd;
+                const progressCtx: SubAgentProgressContext = {
+                  threadId: session.threadId,
+                  turnId,
+                  parentItemId: p.toolItemId,
+                  agentName: p.agentName,
+                  emit,
+                };
+                toolResult = await runSubAgent(subTask, subCwd, session.model, signal, 0, progressCtx);
+              } else {
+                toolResult = await executeToolCall(p.tc.function.name, p.parsedArgs, session.cwd);
+              }
             } catch (error) {
               toolResult = `Error: ${error instanceof Error ? error.message : String(error)}`;
             }
 
             // Emit item.completed
             emit({
-              ...makeEventBase(session.threadId, turnId, toolItemId),
+              ...makeEventBase(session.threadId, turnId, p.toolItemId),
               type: "item.completed",
               payload: {
-                itemType: canonicalType,
+                itemType: p.canonicalType,
                 status: "completed",
-                title: tc.function.name,
-                detail: toolDetail,
+                title: p.isSpawnAgent && p.agentName ? `spawn_agent (${p.agentName})` : p.tc.function.name,
+                detail: p.toolDetail,
+                ...(agentData ? { data: agentData } : {}),
               },
             } as ProviderRuntimeEvent);
 
             session.messages.push({
               role: "tool",
-              tool_call_id: tc.id,
+              tool_call_id: p.tc.id,
               content: toolResult.slice(0, 50_000),
             });
+          };
+
+          // Execute other tools sequentially first
+          for (const p of otherToolCalls) {
+            if (signal.aborted) break;
+            await executePrepared(p);
+          }
+
+          // Execute spawn_agent calls in parallel
+          if (spawnAgentCalls.length > 0 && !signal.aborted) {
+            await Promise.all(spawnAgentCalls.map((p) => executePrepared(p)));
           }
 
           session.updatedAt = nowIso();

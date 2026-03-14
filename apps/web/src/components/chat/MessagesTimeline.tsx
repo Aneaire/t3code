@@ -295,14 +295,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         (() => {
           const groupId = row.id;
           const groupedEntries = row.groupedEntries;
+
+          // Separate agent entries from regular tool entries
+          const agentGroups = new Map<string, TimelineWorkEntry[]>();
+          const regularEntries: TimelineWorkEntry[] = [];
+
+          for (const entry of groupedEntries) {
+            if (entry.itemType === "collab_agent_tool_call" && entry.agentName) {
+              const existing = agentGroups.get(entry.agentName) ?? [];
+              existing.push(entry);
+              agentGroups.set(entry.agentName, existing);
+            } else if (entry.itemType === "collab_agent_tool_call" && !entry.agentName) {
+              // Unnamed agents go into a generic "sub-agent" group
+              const key = "__unnamed_agent__";
+              const existing = agentGroups.get(key) ?? [];
+              existing.push(entry);
+              agentGroups.set(key, existing);
+            } else {
+              regularEntries.push(entry);
+            }
+          }
+
           const isExpanded = expandedWorkGroups[groupId] ?? false;
-          const hasOverflow = groupedEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
+          const hasOverflow = regularEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
           const visibleEntries =
             hasOverflow && !isExpanded
-              ? groupedEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
-              : groupedEntries;
-          const hiddenCount = groupedEntries.length - visibleEntries.length;
-          const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
+              ? regularEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
+              : regularEntries;
+          const hiddenCount = regularEntries.length - visibleEntries.length;
+          const onlyToolEntries = regularEntries.every((entry) => entry.tone === "tool");
           const showHeader = hasOverflow || !onlyToolEntries;
           const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
 
@@ -311,7 +332,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               {showHeader && (
                 <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
                   <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-                    {groupLabel} ({groupedEntries.length})
+                    {groupLabel} ({regularEntries.length})
                   </p>
                   {hasOverflow && (
                     <button
@@ -329,6 +350,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   <SimpleWorkEntryRow key={`work-row:${workEntry.id}`} workEntry={workEntry} />
                 ))}
               </div>
+
+              {/* Agent panels — one per agent */}
+              {agentGroups.size > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {Array.from(agentGroups.entries()).map(([agentKey, agentEntries]) => (
+                    <AgentPanel
+                      key={`agent-panel:${groupId}:${agentKey}`}
+                      agentKey={agentKey}
+                      agentEntries={agentEntries}
+                      groupId={groupId}
+                      isExpanded={expandedWorkGroups[`${groupId}:agent:${agentKey}`] ?? false}
+                      onToggle={onToggleWorkGroup}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           );
         })()}
@@ -781,3 +818,165 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     </div>
   );
 });
+
+// ── Agent Panel Component ────────────────────────────────────────
+// Extracted so each agent panel can manage its own auto-scroll refs.
+
+function AgentPanel({
+  agentKey,
+  agentEntries,
+  groupId,
+  isExpanded,
+  onToggle,
+}: {
+  agentKey: string;
+  agentEntries: TimelineWorkEntry[];
+  groupId: string;
+  isExpanded: boolean;
+  onToggle: (groupId: string) => void;
+}) {
+  const displayName = agentKey === "__unnamed_agent__" ? "Sub-agent" : agentKey;
+  const agentGroupId = `${groupId}:agent:${agentKey}`;
+  const latestEntry = agentEntries[agentEntries.length - 1];
+  const isCompleted = latestEntry?.label?.includes("complete") ?? false;
+
+  // Find the latest summary or streaming response
+  let agentResponseText: string | undefined;
+  for (let ei = agentEntries.length - 1; ei >= 0; ei--) {
+    const e = agentEntries[ei];
+    if (e?.agentSummary) { agentResponseText = e.agentSummary; break; }
+    if (e?.streamingResponse) { agentResponseText = e.streamingResponse; break; }
+  }
+  const isStreaming = !isCompleted && !!latestEntry?.streamingResponse;
+
+  const statusDot = isCompleted
+    ? "bg-emerald-400/70"
+    : isStreaming
+      ? "bg-sky-400/70 animate-pulse"
+      : "bg-amber-400/70 animate-pulse";
+  const statusLabel = isCompleted
+    ? "Done"
+    : isStreaming
+      ? "Responding..."
+      : "Working...";
+
+  // Separate task description, activity entries, and response entries
+  let taskDescription: string | undefined;
+  const activityEntries: TimelineWorkEntry[] = [];
+  for (const e of agentEntries) {
+    if (e.streamingResponse || e.agentSummary) continue;
+    // The "Starting:" entry contains the task — extract and show as header
+    if (!taskDescription && e.detail?.includes("] Starting: ")) {
+      taskDescription = e.detail.replace(/^\[[^\]]*\]\s*Starting:\s*/, "");
+      continue;
+    }
+    activityEntries.push(e);
+  }
+
+  // Auto-scroll refs
+  const activityScrollRef = useRef<HTMLDivElement>(null);
+  const responseScrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll activity log to bottom when new entries arrive
+  useEffect(() => {
+    const el = activityScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activityEntries.length]);
+
+  // Auto-scroll response area to bottom as text streams in
+  useEffect(() => {
+    const el = responseScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [agentResponseText]);
+
+  return (
+    <div className="rounded-lg border border-indigo-500/20 bg-indigo-950/10 dark:bg-indigo-950/20">
+      {/* Agent header */}
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+        onClick={() => onToggle(agentGroupId)}
+      >
+        <div className="flex items-center gap-2">
+          <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
+          <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-indigo-300/80 dark:text-indigo-300/70">
+            {displayName}
+          </p>
+          <span className="rounded-full bg-indigo-500/10 px-1.5 py-0.5 text-[9px] text-indigo-300/50">
+            {statusLabel}
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground/50">
+          {isExpanded ? "Collapse" : "Expand"}
+        </span>
+      </button>
+
+      {/* Task description — always visible below header */}
+      {taskDescription && (
+        <div className="border-t border-indigo-500/10 px-3 py-1.5">
+          <p className="text-[10px] leading-relaxed text-muted-foreground/50">
+            {taskDescription}
+          </p>
+        </div>
+      )}
+
+      {isExpanded && (
+        <div className={taskDescription ? "" : "border-t border-indigo-500/10"}>
+          {/* Activity log — scrollable fixed height, auto-scrolls */}
+          {activityEntries.length > 0 && (
+            <div ref={activityScrollRef} className="max-h-[120px] overflow-y-auto px-3 py-1.5">
+              <p className="mb-1 text-[9px] uppercase tracking-wider text-muted-foreground/30">
+                Activity
+              </p>
+              <div className="space-y-0.5">
+                {activityEntries.map((workEntry) => (
+                  <div
+                    key={`agent-entry:${workEntry.id}`}
+                    className="flex items-start gap-2 py-0.5"
+                  >
+                    <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-indigo-400/30" />
+                    <p className="py-[1px] text-[10px] leading-relaxed text-muted-foreground/60">
+                      {workEntry.detail ? (
+                        <span className="font-mono" title={workEntry.detail}>
+                          {workEntry.detail}
+                        </span>
+                      ) : (
+                        workEntry.label
+                      )}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Agent response / summary — streamed in real-time, auto-scrolls */}
+          {agentResponseText && (
+            <div ref={responseScrollRef} className="max-h-[200px] overflow-y-auto border-t border-indigo-500/10 px-3 py-2">
+              <p className="mb-1 text-[9px] uppercase tracking-wider text-muted-foreground/30">
+                {isCompleted ? "Result" : "Responding"}
+              </p>
+              <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground/80">
+                {agentResponseText}
+                {isStreaming && (
+                  <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-indigo-400/60" />
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Collapsed: show latest status */}
+      {!isExpanded && (
+        <div className="border-t border-indigo-500/10 px-3 py-1.5">
+          <p className="truncate text-[10px] font-mono text-muted-foreground/50">
+            {agentResponseText
+              ? agentResponseText.slice(0, 120) + (agentResponseText.length > 120 ? "..." : "")
+              : latestEntry?.detail ?? latestEntry?.label ?? ""}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}

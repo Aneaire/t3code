@@ -42,6 +42,9 @@ export interface WorkLogEntry {
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  agentName?: string;
+  agentSummary?: string;
+  streamingResponse?: string;
 }
 
 export interface PendingApproval {
@@ -450,6 +453,18 @@ export function deriveWorkLogEntries(
       }
       if (requestKind) {
         entry.requestKind = requestKind;
+      }
+      if (payload && typeof payload.data === "object" && payload.data !== null) {
+        const data = payload.data as Record<string, unknown>;
+        if (typeof data.agentName === "string" && data.agentName.length > 0) {
+          entry.agentName = data.agentName;
+        }
+        if (typeof data.summary === "string" && data.summary.length > 0) {
+          entry.agentSummary = data.summary;
+        }
+        if (typeof data.streamingResponse === "string" && data.streamingResponse.length > 0) {
+          entry.streamingResponse = data.streamingResponse;
+        }
       }
       return entry;
     });
